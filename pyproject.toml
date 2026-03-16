@@ -1,0 +1,6 @@
+[project]
+name = "register-to-class-multi-agent"
+version = "0.1.0"
+description = "Multi agent system to decide whether to register to Ivonne class on Wednesday"
+requires-python = ">=3.12"
+dependencies = []
