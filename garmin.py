@@ -21,7 +21,7 @@ def get_credentials():
     return email, password
 
 
-def init_api():
+def init_api() -> Garmin:
     """Initialize Garmin API with authentication and token management."""
     # Configure token storage
     tokenstore = os.getenv("GARMINTOKENS", "~/.garminconnect")

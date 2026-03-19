@@ -1,4 +1,6 @@
 from pydantic_ai import Agent, RunContext
+from garmin import init_api
+import datetime
 
 OPENAI_MODEL = "gpt-4o-mini"
 
@@ -28,9 +30,21 @@ train_agent = Agent(
     """,
 )
 
+sleep_analysis_agent = Agent(
+    f"openai:{OPENAI_MODEL}",
+    system_prompt="""You are a sleep analysis agent. Your goal is to analyze the user's sleep data and provide a binary result of true or false.'"""
+    )
+
 @train_agent.tool
-def sleep_well(ctx: RunContext[None]) -> bool:
-    return True # todo get from Garmin
+async def sleep_well(ctx: RunContext[None]) -> bool:
+    api = init_api()
+    today = datetime.date.today().isoformat()
+
+    sleep_data = api.get_sleep_data(today)
+    if sleep_data is None:
+        return True
+    result = await sleep_analysis_agent.run(f"Was my sleep good? {sleep_data}")
+    return result.data
 
 @train_agent.tool
 def busy_day(ctx: RunContext[None]) -> bool:
