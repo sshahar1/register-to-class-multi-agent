@@ -1,9 +1,22 @@
-from pydantic_ai import Agent, RunContext
-from garmin import init_api
 import datetime
 import os
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+from garmin import init_api
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from pydantic_ai import Agent, RunContext
+
+PROJECT_DIR = Path(__file__).resolve().parent
+load_dotenv(PROJECT_DIR / ".env")
 
 OPENAI_MODEL = "gpt-4o-mini"
+LOCAL_TIMEZONE = ZoneInfo(os.getenv("CALENDAR_TIMEZONE", "Asia/Jerusalem"))
 
 
 sleep_agent = Agent(
@@ -33,34 +46,48 @@ train_agent = Agent(
 
 sleep_analysis_agent = Agent(
     f"openai:{OPENAI_MODEL}",
-    system_prompt="""You are a sleep analysis agent. Your goal is to analyze the user's sleep data and provide a binary result of true or false.'"""
+    system_prompt="""You are a sleep analysis agent. Your goal is to analyze the user's sleep data and provide a binary result of true or false."""
     )
 
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+TOKEN_FILE = Path(os.getenv("GOOGLE_CALENDAR_TOKEN_FILE", PROJECT_DIR / "token.json"))
+CREDENTIALS_FILE = Path(
+    os.getenv("GOOGLE_CALENDAR_CREDENTIALS_FILE", PROJECT_DIR / "credentials.json")
+)
+
+
+def parse_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    return str(value).strip().lower() == "true"
+
 
 def get_calendar_service():
-    """Shows basic usage of the Google Calendar API.
-    Prints the start and name of the next 10 events on the user's calendar.
-    """
+    """Authenticate with Google Calendar and return a Calendar API service."""
     creds = None
-    # The file token.json stores the user's access and refresh tokens, and is
+    # The token file stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first
     # time.
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    if TOKEN_FILE.exists():
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
     # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
+            if not CREDENTIALS_FILE.exists():
+                print(f"Missing Google Calendar credentials file: {CREDENTIALS_FILE}")
+                return None
+
             flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json", SCOPES
+                str(CREDENTIALS_FILE), SCOPES
             )
             creds = flow.run_local_server(port=0)
         # Save the credentials for the next run
-        with open("token.json", "w") as token:
+        with TOKEN_FILE.open("w") as token:
             token.write(creds.to_json())
 
     try:
@@ -73,13 +100,16 @@ def get_calendar_service():
 @train_agent.tool
 async def sleep_well(ctx: RunContext[None]) -> bool:
     api = init_api()
+    if not api:
+        return True
+
     today = datetime.date.today().isoformat()
 
     sleep_data = api.get_sleep_data(today)
     if sleep_data is None:
         return True
     result = await sleep_analysis_agent.run(f"Was my sleep good? {sleep_data}")
-    return result.data
+    return parse_bool(result.data)
 
 @train_agent.tool
 def busy_day(ctx: RunContext[None]) -> bool:
@@ -87,35 +117,29 @@ def busy_day(ctx: RunContext[None]) -> bool:
     if not service:
         return False
 
-    today = datetime.date.today()
-    start_of_day = datetime.datetime.combine(today, datetime.time.min).isoformat() + 'Z'
-    end_of_day = datetime.datetime.combine(today, datetime.time.max).isoformat() + 'Z'
+    today = datetime.datetime.now(LOCAL_TIMEZONE).date()
+    start_of_day = datetime.datetime.combine(
+        today, datetime.time.min, tzinfo=LOCAL_TIMEZONE
+    )
+    end_of_day = datetime.datetime.combine(
+        today, datetime.time.max, tzinfo=LOCAL_TIMEZONE
+    )
 
-    events_result = service.events().list(
-        calendarId='primary',
-        timeMin=start_of_day,
-        timeMax=end_of_day,
-        singleEvents=True,
-        orderBy='startTime'
-    ).execute()
-    events = events_result.get('items', [])
+    try:
+        events_result = service.events().list(
+            calendarId="primary",
+            timeMin=start_of_day.isoformat(),
+            timeMax=end_of_day.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
+    except HttpError as error:
+        print(f"Could not read Google Calendar events: {error}")
+        return False
 
-    total_duration_seconds = 0
-    for event in events:
-        start_str = event['start'].get('dateTime', event['start'].get('date'))
-        end_str = event['end'].get('dateTime', event['end'].get('date'))
-
-        # Handle all-day events by skipping them
-        if 'T' not in start_str or 'T' not in end_str:
-            continue
-
-        start = datetime.datetime.fromisoformat(start_str.replace('Z', '+00:00'))
-        end = datetime.datetime.fromisoformat(end_str.replace('Z', '+00:00'))
-        duration = end - start
-        total_duration_seconds += duration.total_seconds()
-
-    total_hours = total_duration_seconds / 3600
-    return total_hours > 4
+    events = events_result.get("items", [])
+    meeting_count = sum(1 for event in events if "dateTime" in event.get("start", {}))
+    return meeting_count > 5
 
 @train_agent.tool
 def register(ctx: RunContext[None]) -> str:
